@@ -135,6 +135,8 @@ func makeAnalyzerRunner(rule *RuleInfo, config *Config) func(*analysis.Pass) (in
 }
 
 // hasSinkCalls checks only source instructions, which call graph construction does not change.
+// Sinks reached via go or defer statements (*ssa.Go, *ssa.Defer) count as sink
+// calls just like plain *ssa.Call instructions.
 func (a *Analyzer) hasSinkCalls(funcs []*ssa.Function) bool {
 	for _, fn := range funcs {
 		if fn == nil {
@@ -142,8 +144,8 @@ func (a *Analyzer) hasSinkCalls(funcs []*ssa.Function) bool {
 		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if call, ok := instr.(*ssa.Call); ok {
-					if _, found := a.isSinkCall(call); found {
+				if site, ok := instr.(ssa.CallInstruction); ok {
+					if _, found := a.isSinkCall(site); found {
 						return true
 					}
 				}

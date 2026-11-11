@@ -348,20 +348,23 @@ func (a *Analyzer) analyzeFunctionSinks(fn *ssa.Function) []Result {
 
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			call, ok := instr.(*ssa.Call)
+			// ssa.CallInstruction covers *ssa.Call, *ssa.Go, and *ssa.Defer,
+			// so sinks invoked as go/defer targets take the same taint path
+			// as plain calls.
+			site, ok := instr.(ssa.CallInstruction)
 			if !ok {
 				continue
 			}
 
 			// Check if this call is a sink
-			sink, isSink := a.isSinkCall(call)
+			sink, isSink := a.isSinkCall(site)
 			if !isSink {
 				continue
 			}
 
 			// Apply ArgTypeGuards: skip this sink if argument type constraints
 			// are not satisfied (e.g. writer is not http.ResponseWriter).
-			if !guardsSatisfied(call.Call.Args, sink, a.prog) {
+			if !guardsSatisfied(site.Common().Args, sink, a.prog) {
 				continue
 			}
 
@@ -371,13 +374,13 @@ func (a *Analyzer) analyzeFunctionSinks(fn *ssa.Function) []Result {
 			if len(sink.CheckArgs) > 0 {
 				// Sink specifies which argument positions to check
 				for _, idx := range sink.CheckArgs {
-					if idx < len(call.Call.Args) {
-						argsToCheck = append(argsToCheck, call.Call.Args[idx])
+					if idx < len(site.Common().Args) {
+						argsToCheck = append(argsToCheck, site.Common().Args[idx])
 					}
 				}
 			} else {
 				// No CheckArgs specified: check all arguments
-				argsToCheck = call.Call.Args
+				argsToCheck = site.Common().Args
 			}
 
 			// Check if any of the specified arguments are tainted
@@ -385,7 +388,7 @@ func (a *Analyzer) analyzeFunctionSinks(fn *ssa.Function) []Result {
 				if a.isTainted(arg, fn, make(map[ssa.Value]bool), 0) {
 					results = append(results, Result{
 						Sink:    sink,
-						SinkPos: call.Pos(),
+						SinkPos: site.Pos(),
 						Path:    a.buildPath(fn),
 					})
 					break
@@ -398,17 +401,20 @@ func (a *Analyzer) analyzeFunctionSinks(fn *ssa.Function) []Result {
 }
 
 // isSinkCall checks if a call instruction is a sink and returns the sink info.
-func (a *Analyzer) isSinkCall(call *ssa.Call) (Sink, bool) {
+// The instruction may be a plain call (*ssa.Call) or a go/defer statement
+// (*ssa.Go, *ssa.Defer); all three share ssa.CallCommon semantics.
+func (a *Analyzer) isSinkCall(site ssa.CallInstruction) (Sink, bool) {
+	call := site.Common()
 	// Try to get receiver info first (works for both concrete and interface calls)
 	var pkg, receiverName, methodName string
 	var isPointer bool
 
 	// Check for method call (invoke or static with receiver)
-	if call.Call.IsInvoke() {
+	if call.IsInvoke() {
 		// Interface method call - receiver is in Call.Value, not Args
-		if call.Call.Value != nil {
-			recvType := call.Call.Value.Type()
-			methodName = call.Call.Method.Name()
+		if call.Value != nil {
+			recvType := call.Value.Type()
+			methodName = call.Method.Name()
 
 			// For interface calls, the type is usually a Named type pointing to the interface
 			if named, ok := recvType.(*types.Named); ok {
@@ -428,7 +434,7 @@ func (a *Analyzer) isSinkCall(call *ssa.Call) (Sink, bool) {
 	}
 
 	// Try static callee (for non-interface method calls and functions)
-	callee := call.Call.StaticCallee()
+	callee := call.StaticCallee()
 	if callee != nil {
 		if callee.Pkg != nil && callee.Pkg.Pkg != nil {
 			pkg = callee.Pkg.Pkg.Path()

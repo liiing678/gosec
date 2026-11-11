@@ -27,6 +27,7 @@ func TestRunnerSinkParity(t *testing.T) {
 func Source() string { return "" }
 func Sink(string) {}
 func Other(string) {}
+func Clean(value string) string { return value }
 type Writer interface { Write(string) }
 type Output struct{}
 func (*Output) Write(string) {}
@@ -37,6 +38,15 @@ func Indirect() { Forward(Source()) }
 func Concrete(output *Output) { output.Write(Source()) }
 func Dynamic(output Writer) { output.Write(Source()) }
 func Closure() { f := func() { Sink(Source()) }; f() }
+func GoDirect() { go Sink(Source()) }
+func DeferDirect() { defer Sink(Source()) }
+func GoClosure() { value := Source(); go func() { Sink(value) }() }
+func DeferClosure() { value := Source(); defer func() { Sink(value) }() }
+func GoClosureArg() { go func(value string) { Sink(value) }(Source()) }
+func GoSanitized() { go Sink(Clean(Source())) }
+func DeferSanitized() { defer Sink(Clean(Source())) }
+func GoConstant() { go Sink("safe") }
+func DeferConstant() { defer Sink("safe") }
 func Constant() { Sink("safe") }
 `
 	tests := []struct {
@@ -51,6 +61,15 @@ func Constant() { Sink("safe") }
 		{name: "concrete method", target: "Concrete", sink: Sink{Package: "p", Receiver: "Output", Method: "Write", Pointer: true, CheckArgs: []int{1}}, want: 1},
 		{name: "interface", target: "Dynamic", sink: Sink{Package: "p", Receiver: "Writer", Method: "Write"}, want: 1},
 		{name: "closure", target: "Closure", sink: Sink{Package: "p", Method: "Sink"}, want: 1},
+		{name: "go direct", target: "GoDirect", sink: Sink{Package: "p", Method: "Sink"}, want: 1},
+		{name: "defer direct", target: "DeferDirect", sink: Sink{Package: "p", Method: "Sink"}, want: 1},
+		{name: "go closure", target: "GoClosure", sink: Sink{Package: "p", Method: "Sink"}, want: 1},
+		{name: "defer closure", target: "DeferClosure", sink: Sink{Package: "p", Method: "Sink"}, want: 1},
+		{name: "go closure arg", target: "GoClosureArg", sink: Sink{Package: "p", Method: "Sink"}, want: 1},
+		{name: "go sanitized", target: "GoSanitized", sink: Sink{Package: "p", Method: "Sink"}},
+		{name: "defer sanitized", target: "DeferSanitized", sink: Sink{Package: "p", Method: "Sink"}},
+		{name: "go constant", target: "GoConstant", sink: Sink{Package: "p", Method: "Sink"}},
+		{name: "defer constant", target: "DeferConstant", sink: Sink{Package: "p", Method: "Sink"}},
 		{name: "constant", target: "Constant", sink: Sink{Package: "p", Method: "Sink"}},
 		{name: "different package", target: "Direct", sink: Sink{Package: "other", Method: "Sink"}},
 	}
@@ -58,8 +77,9 @@ func Constant() { Sink("safe") }
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := &Config{
-				Sources: []Source{{Package: "p", Name: "Source", IsFunc: true}},
-				Sinks:   []Sink{tt.sink},
+				Sources:    []Source{{Package: "p", Name: "Source", IsFunc: true}},
+				Sinks:      []Sink{tt.sink},
+				Sanitizers: []Sanitizer{{Package: "p", Method: "Clean"}},
 			}
 			_, result := sinkPrecheckPass(t, source, tt.target)
 			baseline := New(cfg)
