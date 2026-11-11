@@ -327,6 +327,14 @@ gosec --exclude-rules="cmd/.*:G204,G304;test/.*:G101" ./...
 | `path` | string (regex) | Regex matched against file paths |
 | `rules` | []string | Rule IDs to exclude. `*` for all |
 
+By default a matched finding is removed from the report, preserving the
+historical behavior. When `-track-suppressions` is enabled the finding is
+kept and recorded as an `external` suppression instead of being deleted, so
+the audit trail shows which rule ID, path regex and source (`cli` or
+`config`) suppressed it. Overlapping path rules each produce their own
+suppression entry, and suppressed findings do not make the process exit with
+a failure code.
+
 #### Rule Configuration
 
 Some rules accept configuration flags as well; these flags are

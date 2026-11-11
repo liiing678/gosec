@@ -202,6 +202,48 @@ var _ = Describe("Sarif Formatter", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(validateSarifSchema(sarifReport)).To(Succeed())
 		})
+		It("sarif formatted report should carry external suppression rule, path and source", func() {
+			ruleID := "G204"
+			cwe := issue.GetCweByRule(ruleID)
+			suppressedIssue := issue.Issue{
+				File:       "/home/src/project/cmd/main.go",
+				Line:       "9",
+				Col:        "8",
+				RuleID:     ruleID,
+				What:       "test",
+				Confidence: issue.High,
+				Severity:   issue.High,
+				Code:       "9: exec.Command(\"ls\")",
+				Cwe:        cwe,
+				Suppressions: []issue.SuppressionInfo{
+					{
+						Kind:          "external",
+						Justification: "Suppressed by exclude-rules (source: cli, path: cmd/.*, rule: G204).",
+						Rule:          "G204",
+						Path:          "cmd/.*",
+						Source:        "cli",
+					},
+				},
+			}
+
+			reportInfo := gosec.NewReportInfo([]*issue.Issue{&suppressedIssue}, &gosec.Metrics{}, map[string][]gosec.Error{}).WithVersion("v2.7.0")
+			sarifReport, err := sarif.GenerateReport([]string{}, reportInfo)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(validateSarifSchema(sarifReport)).To(Succeed())
+
+			suppressions := sarifReport.Runs[0].Results[0].Suppressions
+			Expect(suppressions).To(HaveLen(1))
+			Expect(suppressions[0].Kind).To(Equal("external"))
+			Expect(suppressions[0].Properties).NotTo(BeNil())
+			Expect((*suppressions[0].Properties)["rule"]).To(Equal("G204"))
+			Expect((*suppressions[0].Properties)["path"]).To(Equal("cmd/.*"))
+			Expect((*suppressions[0].Properties)["source"]).To(Equal("cli"))
+
+			buf := new(bytes.Buffer)
+			Expect(sarif.WriteReport(buf, reportInfo, []string{})).To(Succeed())
+			Expect(buf.String()).To(ContainSubstring(`"source": "cli"`))
+			Expect(buf.String()).To(ContainSubstring(`"path": "cmd/.*"`))
+		})
 		It("sarif formatted report should contain the formatted one line code snippet", func() {
 			ruleID := "G101"
 			cwe := issue.GetCweByRule(ruleID)

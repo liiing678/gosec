@@ -396,6 +396,11 @@ func buildPathExclusionFilter(config gosec.Config, cliFlag string) (*gosec.PathE
 	if err != nil {
 		return nil, fmt.Errorf("invalid exclude-rules in config: %w", err)
 	}
+	for i := range configRules {
+		if configRules[i].Source == "" {
+			configRules[i].Source = gosec.ExcludeRulesSourceConfig
+		}
+	}
 
 	// Merge rules (CLI takes precedence)
 	allRules := gosec.MergeExcludeRules(configRules, cliRules)
@@ -556,9 +561,16 @@ func run() int {
 	// Collect the results
 	issues, metrics, errors := analyzer.Report()
 
-	// Apply path-based exclusions first
+	// Apply path-based exclusions first. With suppression tracking enabled the
+	// findings are kept and annotated as external suppressions so the rule,
+	// path and source remain auditable; otherwise they retain the legacy
+	// behavior of being removed from the report.
 	var pathExcludedCount int
-	issues, pathExcludedCount = pathFilter.FilterIssues(issues)
+	if *flagTrackSuppressions {
+		pathExcludedCount = pathFilter.SuppressIssues(issues)
+	} else {
+		issues, pathExcludedCount = pathFilter.FilterIssues(issues)
+	}
 	if pathExcludedCount > 0 {
 		logger.Printf("Excluded %d issues by path-based rules", pathExcludedCount)
 	}

@@ -262,7 +262,21 @@ func getSarifLevel(s string) Level {
 func buildSarifSuppressions(suppressions []issue.SuppressionInfo) []*Suppression {
 	var sarifSuppressionList []*Suppression
 	for _, s := range suppressions {
-		sarifSuppressionList = append(sarifSuppressionList, NewSuppression(s.Kind, s.Justification))
+		sarifSuppression := NewSuppression(s.Kind, s.Justification)
+		properties := PropertyBag{}
+		if s.Rule != "" {
+			properties["rule"] = s.Rule
+		}
+		if s.Path != "" {
+			properties["path"] = s.Path
+		}
+		if s.Source != "" {
+			properties["source"] = s.Source
+		}
+		if len(properties) > 0 {
+			sarifSuppression.Properties = &properties
+		}
+		sarifSuppressionList = append(sarifSuppressionList, sarifSuppression)
 	}
 	return sarifSuppressionList
 }

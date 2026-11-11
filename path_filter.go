@@ -8,10 +8,20 @@ import (
 	"github.com/securego/gosec/v2/issue"
 )
 
+const (
+	// ExcludeRulesSourceCLI marks path exclusion rules provided via the --exclude-rules flag.
+	ExcludeRulesSourceCLI = "cli"
+	// ExcludeRulesSourceConfig marks path exclusion rules provided through the configuration file.
+	ExcludeRulesSourceConfig = "config"
+	// excludeRulesSourceDefault is used when the origin of a rule cannot be determined.
+	excludeRulesSourceDefault = "unknown"
+)
+
 // PathExcludeRule defines rules to exclude for specific file paths
 type PathExcludeRule struct {
-	Path  string   `json:"path"`  // Regex pattern for matching file paths
-	Rules []string `json:"rules"` // Rule IDs to exclude. Use "*" to exclude all rules
+	Path   string   `json:"path"`             // Regex pattern for matching file paths
+	Rules  []string `json:"rules"`            // Rule IDs to exclude. Use "*" to exclude all rules
+	Source string   `json:"source,omitempty"` // Origin of the rule (cli or config)
 }
 
 // compiledPathRule is a pre-compiled version of PathExcludeRule for efficient matching
@@ -19,7 +29,15 @@ type compiledPathRule struct {
 	pathRegex  *regexp.Regexp
 	ruleSet    map[string]bool // Set of rule IDs to exclude
 	excludeAll bool            // True if "*" was specified in rules
+	source     string          // Origin of the rule (cli or config)
 	original   PathExcludeRule // Keep original for error messages
+}
+
+// PathSuppression describes a single path-based exclusion that matched an issue.
+type PathSuppression struct {
+	RuleID string // Suppressed rule ID, or "*" when every rule is excluded for the path
+	Path   string // Configured path regex responsible for the suppression
+	Source string // Origin of the exclusion rule (cli or config)
 }
 
 // PathExclusionFilter handles filtering of issues based on path and rule combinations
@@ -62,6 +80,7 @@ func NewPathExclusionFilter(rules []PathExcludeRule) (*PathExclusionFilter, erro
 			pathRegex:  regex,
 			ruleSet:    ruleSet,
 			excludeAll: excludeAll,
+			source:     exclusionSource(rule.Source),
 			original:   rule,
 		})
 	}
@@ -69,28 +88,55 @@ func NewPathExclusionFilter(rules []PathExcludeRule) (*PathExclusionFilter, erro
 	return &PathExclusionFilter{rules: compiled}, nil
 }
 
+// exclusionSource normalizes the provenance of an exclusion rule, falling back
+// to a stable value when the source was not recorded.
+func exclusionSource(source string) string {
+	if strings.TrimSpace(source) == "" {
+		return excludeRulesSourceDefault
+	}
+	return source
+}
+
 // ShouldExclude returns true if the given issue should be excluded based on
 // its file path and rule ID
 func (f *PathExclusionFilter) ShouldExclude(filePath, ruleID string) bool {
+	return len(f.MatchingSuppressions(filePath, ruleID)) > 0
+}
+
+// MatchingSuppressions returns every path exclusion rule that applies to the
+// given file path and rule ID, in configuration order. Overlapping rules each
+// produce their own entry so audits can trace every rule that suppressed a
+// finding. A wildcard ("*") rule is reported with RuleID set to "*".
+func (f *PathExclusionFilter) MatchingSuppressions(filePath, ruleID string) []PathSuppression {
 	if f == nil || len(f.rules) == 0 {
-		return false
+		return nil
 	}
 
 	// Normalize path separators for consistent matching
 	normalizedPath := strings.ReplaceAll(filePath, "\\", "/")
 
+	var matches []PathSuppression
 	for _, rule := range f.rules {
 		if rule.pathRegex.MatchString(normalizedPath) {
 			if rule.excludeAll {
-				return true
+				matches = append(matches, PathSuppression{
+					RuleID: aliasOfAllRules,
+					Path:   rule.original.Path,
+					Source: rule.source,
+				})
+				continue
 			}
 			if rule.ruleSet[ruleID] {
-				return true
+				matches = append(matches, PathSuppression{
+					RuleID: ruleID,
+					Path:   rule.original.Path,
+					Source: rule.source,
+				})
 			}
 		}
 	}
 
-	return false
+	return matches
 }
 
 // FilterIssues applies path-based exclusions to a slice of issues.
@@ -104,7 +150,7 @@ func (f *PathExclusionFilter) FilterIssues(issues []*issue.Issue) ([]*issue.Issu
 	excluded := 0
 
 	for _, iss := range issues {
-		if f.ShouldExclude(iss.File, iss.RuleID) {
+		if len(f.MatchingSuppressions(iss.File, iss.RuleID)) > 0 {
 			excluded++
 			continue
 		}
@@ -112,6 +158,44 @@ func (f *PathExclusionFilter) FilterIssues(issues []*issue.Issue) ([]*issue.Issu
 	}
 
 	return filtered, excluded
+}
+
+// SuppressIssues annotates issues matched by path exclusion rules with external
+// suppressions instead of dropping them. Every overlapping rule is recorded
+// separately, carrying the suppressed rule ID, the path regex and the rule
+// source. Issues without a match are left untouched. It returns the number of
+// suppressed issues.
+func (f *PathExclusionFilter) SuppressIssues(issues []*issue.Issue) int {
+	if f == nil || len(f.rules) == 0 || len(issues) == 0 {
+		return 0
+	}
+
+	suppressed := 0
+	for _, iss := range issues {
+		matches := f.MatchingSuppressions(iss.File, iss.RuleID)
+		if len(matches) == 0 {
+			continue
+		}
+		for _, match := range matches {
+			iss.Suppressions = append(iss.Suppressions, issue.SuppressionInfo{
+				Kind:          "external",
+				Justification: pathSuppressionJustification(match),
+				Rule:          match.RuleID,
+				Path:          match.Path,
+				Source:        match.Source,
+			})
+		}
+		suppressed++
+	}
+
+	return suppressed
+}
+
+// pathSuppressionJustification renders a stable, human-readable justification
+// for a path-based external suppression.
+func pathSuppressionJustification(match PathSuppression) string {
+	return fmt.Sprintf("Suppressed by exclude-rules (source: %s, path: %s, rule: %s).",
+		match.Source, match.Path, match.RuleID)
 }
 
 // ParseCLIExcludeRules parses the CLI format for exclude-rules.
@@ -165,8 +249,9 @@ func ParseCLIExcludeRules(input string) ([]PathExcludeRule, error) {
 		}
 
 		rules = append(rules, PathExcludeRule{
-			Path:  pathPattern,
-			Rules: cleanedRules,
+			Path:   pathPattern,
+			Rules:  cleanedRules,
+			Source: ExcludeRulesSourceCLI,
 		})
 	}
 

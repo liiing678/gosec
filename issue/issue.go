@@ -141,6 +141,9 @@ type Issue struct {
 type SuppressionInfo struct {
 	Kind          string `json:"kind"`
 	Justification string `json:"justification"`
+	Rule          string `json:"rule,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Source        string `json:"source,omitempty"`
 }
 
 // FileLocation point out the file path and line number in file

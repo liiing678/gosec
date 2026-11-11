@@ -231,6 +231,122 @@ var _ = Describe("PathExclusionFilter", func() {
 		})
 	})
 
+	Describe("MatchingSuppressions", func() {
+		It("should report every overlapping rule with rule, path and source", func() {
+			rules := []gosec.PathExcludeRule{
+				{Path: "cmd/.*", Rules: []string{"G204"}, Source: gosec.ExcludeRulesSourceCLI},
+				{Path: "cmd/.*", Rules: []string{"*"}, Source: gosec.ExcludeRulesSourceConfig},
+			}
+			filter, err := gosec.NewPathExclusionFilter(rules)
+			Expect(err).NotTo(HaveOccurred())
+
+			matches := filter.MatchingSuppressions("cmd/main.go", "G204")
+			Expect(matches).To(HaveLen(2))
+			Expect(matches[0]).To(Equal(gosec.PathSuppression{
+				RuleID: "G204",
+				Path:   "cmd/.*",
+				Source: gosec.ExcludeRulesSourceCLI,
+			}))
+			Expect(matches[1]).To(Equal(gosec.PathSuppression{
+				RuleID: "*",
+				Path:   "cmd/.*",
+				Source: gosec.ExcludeRulesSourceConfig,
+			}))
+		})
+
+		It("should return no matches for unrelated issues", func() {
+			rules := []gosec.PathExcludeRule{
+				{Path: "cmd/.*", Rules: []string{"G204"}, Source: gosec.ExcludeRulesSourceCLI},
+			}
+			filter, err := gosec.NewPathExclusionFilter(rules)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(filter.MatchingSuppressions("pkg/main.go", "G204")).To(BeNil())
+			Expect(filter.MatchingSuppressions("cmd/main.go", "G101")).To(BeNil())
+		})
+
+		It("should default an empty source to unknown", func() {
+			rules := []gosec.PathExcludeRule{
+				{Path: "cmd/.*", Rules: []string{"G204"}},
+			}
+			filter, err := gosec.NewPathExclusionFilter(rules)
+			Expect(err).NotTo(HaveOccurred())
+
+			matches := filter.MatchingSuppressions("cmd/main.go", "G204")
+			Expect(matches).To(HaveLen(1))
+			Expect(matches[0].Source).To(Equal("unknown"))
+		})
+	})
+
+	Describe("SuppressIssues", func() {
+		var filter *gosec.PathExclusionFilter
+
+		BeforeEach(func() {
+			rules := []gosec.PathExcludeRule{
+				{Path: "cmd/.*", Rules: []string{"G204"}, Source: gosec.ExcludeRulesSourceCLI},
+				{Path: "test/.*", Rules: []string{"*"}, Source: gosec.ExcludeRulesSourceConfig},
+			}
+			var err error
+			filter, err = gosec.NewPathExclusionFilter(rules)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should annotate matched issues as external suppressions and keep them", func() {
+			issues := []*issue.Issue{
+				{File: "cmd/main.go", RuleID: "G204"},
+				{File: "test/helper.go", RuleID: "G101"},
+				{File: "pkg/server.go", RuleID: "G204"},
+			}
+
+			suppressed := filter.SuppressIssues(issues)
+			Expect(suppressed).To(Equal(2))
+			Expect(issues).To(HaveLen(3))
+
+			Expect(issues[0].Suppressions).To(HaveLen(1))
+			Expect(issues[0].Suppressions[0].Kind).To(Equal("external"))
+			Expect(issues[0].Suppressions[0].Rule).To(Equal("G204"))
+			Expect(issues[0].Suppressions[0].Path).To(Equal("cmd/.*"))
+			Expect(issues[0].Suppressions[0].Source).To(Equal(gosec.ExcludeRulesSourceCLI))
+			Expect(issues[0].Suppressions[0].Justification).To(ContainSubstring("cmd/.*"))
+
+			Expect(issues[1].Suppressions).To(HaveLen(1))
+			Expect(issues[1].Suppressions[0].Rule).To(Equal("*"))
+			Expect(issues[1].Suppressions[0].Source).To(Equal(gosec.ExcludeRulesSourceConfig))
+
+			Expect(issues[2].Suppressions).To(BeEmpty())
+		})
+
+		It("should preserve pre-existing suppressions and record every overlap", func() {
+			rules := []gosec.PathExcludeRule{
+				{Path: "cmd/.*", Rules: []string{"G204"}, Source: gosec.ExcludeRulesSourceCLI},
+				{Path: "cmd/.*", Rules: []string{"*"}, Source: gosec.ExcludeRulesSourceConfig},
+			}
+			overlapFilter, err := gosec.NewPathExclusionFilter(rules)
+			Expect(err).NotTo(HaveOccurred())
+
+			issues := []*issue.Issue{{
+				File:   "cmd/main.go",
+				RuleID: "G204",
+				Suppressions: []issue.SuppressionInfo{
+					{Kind: "inSource", Justification: "accepted"},
+				},
+			}}
+
+			suppressed := overlapFilter.SuppressIssues(issues)
+			Expect(suppressed).To(Equal(1))
+			Expect(issues[0].Suppressions).To(HaveLen(3))
+			Expect(issues[0].Suppressions[0].Kind).To(Equal("inSource"))
+			Expect(issues[0].Suppressions[1].Kind).To(Equal("external"))
+			Expect(issues[0].Suppressions[2].Kind).To(Equal("external"))
+		})
+
+		It("should be a no-op without rules or issues", func() {
+			emptyFilter, err := gosec.NewPathExclusionFilter(nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(emptyFilter.SuppressIssues(nil)).To(Equal(0))
+		})
+	})
+
 	Describe("ParseCLIExcludeRules", func() {
 		Context("with valid input", func() {
 			It("should parse single rule", func() {
@@ -239,6 +355,7 @@ var _ = Describe("PathExclusionFilter", func() {
 				Expect(rules).To(HaveLen(1))
 				Expect(rules[0].Path).To(Equal("cmd/.*"))
 				Expect(rules[0].Rules).To(ConsistOf("G204", "G304"))
+				Expect(rules[0].Source).To(Equal(gosec.ExcludeRulesSourceCLI))
 			})
 
 			It("should parse multiple rules separated by semicolon", func() {
